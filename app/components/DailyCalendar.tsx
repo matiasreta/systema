@@ -313,6 +313,15 @@ export default function DailyCalendar({
       </div>
 
       <div className="time-grid-container" ref={containerRef}>
+        {/* Columna de horas separada e independiente */}
+        <div className="hours-column">
+          {timeSlots.map((slot) => (
+            <div key={slot.minutes} className="hour-row">
+              {slot.isHourStart && <span className="hour-text">{slot.label}</span>}
+            </div>
+          ))}
+        </div>
+
         <div className="time-grid">
           {timeSlots.map((slot) => {
             const isSelected = isSlotInSelection(slot.minutes);
@@ -332,9 +341,6 @@ export default function DailyCalendar({
                 onClick={() => handleSlotClick(slot.minutes)}
                 onMouseEnter={() => handleSlotHover(slot.minutes)}
               >
-                <div className="time-label">
-                  {slot.isHourStart && <span className="hour-text">{slot.label}</span>}
-                </div>
                 <div className="slot-content"></div>
               </div>
             );
@@ -576,38 +582,22 @@ export default function DailyCalendar({
           scrollbar-color: #fff #000;
         }
 
-        .time-grid {
-          position: relative;
-          height: ${TOTAL_HEIGHT}px;
-        }
-
-        .time-slot {
-          display: flex;
-          height: ${SLOT_HEIGHT}px;
-          position: relative;
-          border-bottom: 1px solid #1a1a1a;
-        }
-
-        .time-slot.hour-start {
-          border-bottom: 1px solid #333;
-        }
-
-        .time-slot:hover { background: #111; }
-        .time-slot.selecting-mode { cursor: crosshair; }
-        .time-slot.selecting-mode:hover { background: #1a2f1a; }
-        .time-slot.selected-slot { background: #00ff00 !important; }
-        .time-slot.selected-real { background: #ff3333 !important; }
-        .time-slot.selected-slot .hour-text,
-        .time-slot.selected-real .hour-text { color: #000; }
-        .time-slot.current-slot { background: #1a1a1a; }
-
-        .time-label {
+        .hours-column {
+          position: absolute;
+          left: 0;
+          top: 0;
           width: 60px;
-          flex-shrink: 0;
+          height: ${TOTAL_HEIGHT}px;
+          z-index: 20;
+          background: #000000;
+          pointer-events: none;
+        }
+
+        .hour-row {
+          height: ${SLOT_HEIGHT}px;
           display: flex;
           align-items: flex-start;
           padding: 0 8px;
-          border-right: 2px solid #222;
         }
 
         .hour-text {
@@ -618,6 +608,24 @@ export default function DailyCalendar({
           letter-spacing: 0.08em;
         }
 
+        .time-grid {
+          position: relative;
+          height: ${TOTAL_HEIGHT}px;
+          margin-left: 60px;
+        }
+
+        .time-slot {
+          display: flex;
+          height: ${SLOT_HEIGHT}px;
+          position: relative;
+        }
+
+        .time-slot.selecting-mode { cursor: crosshair; }
+        .time-slot.selecting-mode .slot-content:hover { background: #1a2f1a; }
+        .time-slot.selected-slot .slot-content { background: #00ff00; }
+        .time-slot.selected-real .slot-content { background: #ff3333; }
+        .time-slot.current-slot .slot-content { background: #1a1a1a; }
+
         .slot-content {
           flex: 1;
           position: relative;
@@ -625,7 +633,7 @@ export default function DailyCalendar({
 
         .task-card {
           position: absolute;
-          left: 60px;
+          left: 0;
           padding: 3px 6px;
           border: 2px solid;
           overflow: hidden;
@@ -643,7 +651,7 @@ export default function DailyCalendar({
         .task-card.task-ideal.has-real { opacity: 0.5; }
 
         .task-card.task-real {
-          left: calc(50% + 60px);
+          left: 50%;
           right: 0;
           background: #ff0000;
           border-color: #cc0000;
@@ -656,7 +664,7 @@ export default function DailyCalendar({
 
         .time-indicator {
           position: absolute;
-          left: 60px;
+          left: 0;
           right: 0;
           display: flex;
           align-items: center;

@@ -620,11 +620,20 @@ export default function DailyCalendar({
           position: relative;
         }
 
+        .time-slot.hour-start {
+          border-top: 1px solid #333;
+        }
+
         .time-slot.selecting-mode { cursor: crosshair; }
-        .time-slot.selecting-mode .slot-content:hover { background: #1a2f1a; }
+        
+        /* current-slot solo aplica cuando NO está seleccionado */
+        .time-slot.current-slot:not(.selected-slot):not(.selected-real) .slot-content { 
+          background: #1a1a1a; 
+        }
+        
+        /* Selección siempre tiene prioridad */
         .time-slot.selected-slot .slot-content { background: #00ff00; }
         .time-slot.selected-real .slot-content { background: #ff3333; }
-        .time-slot.current-slot .slot-content { background: #1a1a1a; }
 
         .slot-content {
           flex: 1;

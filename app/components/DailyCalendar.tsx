@@ -1,36 +1,27 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
+import { Habit, DailyRecord } from '../types/habits';
+import { formatTimeFromMinutes, getDateKey as getDateKeyUtil } from '../lib/dateUtils';
 
-export type TaskMode = 'idle' | 'setting-ideal' | 'marking-real';
-
-// Time is stored as minutes from midnight (0-1439)
-export interface Task {
-  id: string;
-  title: string;
-  description: string;
-  startTime: number; // minutes from midnight
-  endTime: number;   // minutes from midnight
-  type: 'ideal' | 'real';
-  date: string;
-  linkedIdealTaskId?: string;
-  realTaskId?: string;
-}
+export type AppMode = 'idle' | 'marking-real';
 
 interface TimeSlot {
-  minutes: number; // minutes from midnight
+  minutes: number;
   label: string;
   isHourStart: boolean;
 }
 
 interface DailyCalendarProps {
-  mode: TaskMode;
-  onModeChange: (mode: TaskMode) => void;
-  tasks: Task[];
-  onTaskCreate: (task: Task) => void;
-  onTaskUpdate: (taskId: string, updates: Partial<Task>) => void;
-  selectedIdealTask: Task | null;
-  onSelectIdealTask: (task: Task | null) => void;
+  mode: AppMode;
+  onModeChange: (mode: AppMode) => void;
+  habits: Habit[];
+  records: DailyRecord[];
+  selectedHabit: Habit | null;
+  onRecordHabitTime: (startTime: number, endTime: number) => Promise<{ success: boolean; error?: string }>;
+  onDateChange: (date: Date) => void;
+  onSelectHabit?: (habit: Habit | null) => void;
+  children?: React.ReactNode;
 }
 
 // Generate 144 slots (24 hours * 6 ten-minute intervals)
@@ -53,33 +44,26 @@ const generateTimeSlots = (): TimeSlot[] => {
   return slots;
 };
 
-const formatTime = (minutes: number): string => {
-  const hour = Math.floor(minutes / 60);
-  const mins = minutes % 60;
-  const period = hour < 12 ? 'AM' : 'PM';
-  const displayHour = hour === 0 ? 12 : hour > 12 ? hour - 12 : hour;
-  return `${displayHour}:${mins.toString().padStart(2, '0')}${period}`;
-};
-
-const SLOT_HEIGHT = 10; // 10px per 10-minute slot
-const TOTAL_HEIGHT = 144 * SLOT_HEIGHT; // 1440px total
+const SLOT_HEIGHT = 10;
+const TOTAL_HEIGHT = 144 * SLOT_HEIGHT;
 
 export default function DailyCalendar({
   mode,
   onModeChange,
-  tasks,
-  onTaskCreate,
-  onTaskUpdate,
-  selectedIdealTask,
-  onSelectIdealTask
+  habits,
+  records,
+  selectedHabit,
+  onRecordHabitTime,
+  onDateChange,
+  onSelectHabit,
+  children
 }: DailyCalendarProps) {
   const [currentTime, setCurrentTime] = useState(new Date());
   const [selectedDate, setSelectedDate] = useState(new Date());
   const [selectionStart, setSelectionStart] = useState<number | null>(null);
   const [selectionEnd, setSelectionEnd] = useState<number | null>(null);
-  const [showTaskForm, setShowTaskForm] = useState(false);
-  const [taskTitle, setTaskTitle] = useState('');
-  const [taskDescription, setTaskDescription] = useState('');
+  const [showConfirmForm, setShowConfirmForm] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const currentTimeRef = useRef<HTMLDivElement>(null);
@@ -101,21 +85,11 @@ export default function DailyCalendar({
     );
   };
 
-  const getDateKey = (date: Date) => {
-    return `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
-  };
-
-  const tasksForSelectedDate = tasks.filter(
-    task => task.date === getDateKey(selectedDate)
-  );
-
-  const idealTasks = tasksForSelectedDate.filter(t => t.type === 'ideal');
-  const realTasks = tasksForSelectedDate.filter(t => t.type === 'real');
-
   const goToPreviousDay = () => {
     const newDate = new Date(selectedDate);
     newDate.setDate(newDate.getDate() - 1);
     setSelectedDate(newDate);
+    onDateChange(newDate);
     clearSelection();
   };
 
@@ -123,30 +97,22 @@ export default function DailyCalendar({
     const newDate = new Date(selectedDate);
     newDate.setDate(newDate.getDate() + 1);
     setSelectedDate(newDate);
+    onDateChange(newDate);
     clearSelection();
   };
 
   const goToToday = () => {
-    setSelectedDate(new Date());
+    const today = new Date();
+    setSelectedDate(today);
+    onDateChange(today);
     clearSelection();
   };
 
   const clearSelection = () => {
     setSelectionStart(null);
     setSelectionEnd(null);
-    setShowTaskForm(false);
-    setTaskTitle('');
-    setTaskDescription('');
-    onSelectIdealTask(null);
-    if (mode === 'marking-real') {
-      onModeChange('idle');
-    }
-  };
-
-  const handleTagClick = (task: Task) => {
-    if (task.realTaskId) return;
-    onSelectIdealTask(task);
-    onModeChange('marking-real');
+    setShowConfirmForm(false);
+    setError(null);
   };
 
   const handleSlotClick = (minutes: number) => {
@@ -155,58 +121,37 @@ export default function DailyCalendar({
     if (selectionStart === null) {
       setSelectionStart(minutes);
       setSelectionEnd(minutes);
-    } else if (!showTaskForm) {
+    } else if (!showConfirmForm) {
       const start = Math.min(selectionStart, minutes);
       const end = Math.max(selectionStart, minutes);
       setSelectionStart(start);
       setSelectionEnd(end);
-      setShowTaskForm(true);
+      setShowConfirmForm(true);
     }
   };
 
   const handleSlotHover = (minutes: number) => {
-    if (mode === 'idle' || selectionStart === null || showTaskForm) return;
+    if (mode === 'idle' || selectionStart === null || showConfirmForm) return;
     setSelectionEnd(minutes);
   };
 
-  const handleCreateTask = () => {
+  const handleConfirmRecord = async () => {
     if (selectionStart === null || selectionEnd === null) return;
 
     const start = Math.min(selectionStart, selectionEnd);
-    const end = Math.max(selectionStart, selectionEnd) + 10; // +10 to include the last slot
+    const end = Math.max(selectionStart, selectionEnd) + 10;
 
-    if (mode === 'setting-ideal') {
-      const newTask: Task = {
-        id: Date.now().toString(),
-        title: taskTitle || 'Sin título',
-        description: taskDescription,
-        startTime: start,
-        endTime: end,
-        type: 'ideal',
-        date: getDateKey(selectedDate),
-      };
-      onTaskCreate(newTask);
-    } else if (mode === 'marking-real' && selectedIdealTask) {
-      const newRealTask: Task = {
-        id: Date.now().toString(),
-        title: selectedIdealTask.title,
-        description: selectedIdealTask.description,
-        startTime: start,
-        endTime: end,
-        type: 'real',
-        date: getDateKey(selectedDate),
-        linkedIdealTaskId: selectedIdealTask.id,
-      };
-      onTaskCreate(newRealTask);
-      onTaskUpdate(selectedIdealTask.id, { realTaskId: newRealTask.id });
+    const result = await onRecordHabitTime(start, end);
+    if (result.success) {
+      clearSelection();
+    } else if (result.error) {
+      setError(result.error);
     }
-
-    clearSelection();
-    onModeChange('idle');
   };
 
-  const handleCancelTask = () => {
+  const handleCancelRecord = () => {
     clearSelection();
+    onModeChange('idle');
   };
 
   const isSlotInSelection = (minutes: number): boolean => {
@@ -238,7 +183,7 @@ export default function DailyCalendar({
       });
     } else if (containerRef.current) {
       containerRef.current.scrollTo({
-        top: 8 * 6 * SLOT_HEIGHT, // 8AM position
+        top: 8 * 6 * SLOT_HEIGHT,
         behavior: 'auto',
       });
     }
@@ -251,7 +196,8 @@ export default function DailyCalendar({
       month: 'long',
       day: 'numeric'
     };
-    return selectedDate.toLocaleDateString('es-ES', options).toUpperCase();
+    const formatted = selectedDate.toLocaleDateString('es-ES', options);
+    return formatted.charAt(0).toUpperCase() + formatted.slice(1);
   };
 
   const formatCurrentTime = () => {
@@ -262,7 +208,6 @@ export default function DailyCalendar({
     });
   };
 
-  // Get the current 10-minute slot
   const currentSlotMinutes = Math.floor(getCurrentTimeInMinutes() / 10) * 10;
 
   return (
@@ -271,49 +216,32 @@ export default function DailyCalendar({
         <div className="header-top">
           <div className="date-section">
             <h2 className="current-date">{formatSelectedDate()}</h2>
-            {isToday() && <span className="time-text">[{formatCurrentTime()}]</span>}
+            {isToday() && <span className="time-text">{formatCurrentTime()}</span>}
           </div>
           <div className="navigation-buttons">
-            <button className="nav-btn" onClick={goToPreviousDay}>◄</button>
-            <button className={`today-btn ${isToday() ? 'today-active' : ''}`} onClick={goToToday}>HOY</button>
-            <button className="nav-btn" onClick={goToNextDay}>►</button>
+            <button className="nav-btn" onClick={goToPreviousDay}>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M15 18l-6-6 6-6" />
+              </svg>
+            </button>
+            <button className={`today-btn ${isToday() ? 'today-active' : ''}`} onClick={goToToday}>Hoy</button>
+            <button className="nav-btn" onClick={goToNextDay}>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M9 18l6-6-6-6" />
+              </svg>
+            </button>
           </div>
         </div>
 
-        {idealTasks.length > 0 && (
-          <div className="task-tags-section">
-            <span className="tags-label">TAREAS:</span>
-            <div className="task-tags">
-              {idealTasks.map(task => {
-                const hasReal = !!task.realTaskId;
-                const isSelected = selectedIdealTask?.id === task.id;
-                return (
-                  <button
-                    key={task.id}
-                    className={`task-tag ${hasReal ? 'completed' : ''} ${isSelected ? 'selected' : ''}`}
-                    onClick={() => handleTagClick(task)}
-                    disabled={hasReal || mode === 'setting-ideal'}
-                  >
-                    <span className="tag-title">{task.title}</span>
-                    <span className="tag-time">{formatTime(task.startTime)}-{formatTime(task.endTime)}</span>
-                    {hasReal && <span className="tag-check">✓</span>}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-        )}
-
-        {mode === 'marking-real' && selectedIdealTask && (
+        {mode === 'marking-real' && selectedHabit && (
           <div className="marking-indicator">
-            <span>MARCANDO: <strong>{selectedIdealTask.title}</strong></span>
-            <button className="cancel-btn-small" onClick={clearSelection}>✕</button>
+            <span>Registrando: <strong>{selectedHabit.title}</strong></span>
+            <button className="cancel-btn-small" onClick={handleCancelRecord}>✕</button>
           </div>
         )}
       </div>
 
       <div className="time-grid-container" ref={containerRef}>
-        {/* Columna de horas separada e independiente */}
         <div className="hours-column">
           {timeSlots.map((slot) => (
             <div key={slot.minutes} className="hour-row">
@@ -326,7 +254,6 @@ export default function DailyCalendar({
           {timeSlots.map((slot) => {
             const isSelected = isSlotInSelection(slot.minutes);
             const isSelecting = mode !== 'idle';
-            const isMarkingReal = mode === 'marking-real';
             const isCurrent = isToday() && currentSlotMinutes === slot.minutes;
 
             return (
@@ -335,7 +262,7 @@ export default function DailyCalendar({
                 className={`time-slot 
                   ${slot.isHourStart ? 'hour-start' : ''}
                   ${isCurrent ? 'current-slot' : ''}
-                  ${isSelected ? (isMarkingReal ? 'selected-real' : 'selected-slot') : ''}
+                  ${isSelected ? 'selected-real' : ''}
                   ${isSelecting ? 'selecting-mode' : ''}
                 `}
                 onClick={() => handleSlotClick(slot.minutes)}
@@ -346,36 +273,63 @@ export default function DailyCalendar({
             );
           })}
 
-          {/* Render task cards separately for better positioning */}
-          {idealTasks.map(task => {
-            const top = (task.startTime / 10) * SLOT_HEIGHT;
-            const height = ((task.endTime - task.startTime) / 10) * SLOT_HEIGHT;
-            const hasReal = !!task.realTaskId;
+          {/* Render habit ideal blocks - dotted outline 'holes' */}
+          {habits.map(habit => {
+            const top = (habit.startTime / 10) * SLOT_HEIGHT;
+            const height = ((habit.endTime - habit.startTime) / 10) * SLOT_HEIGHT;
+            const record = records.find(r => r.habitId === habit.id);
+            const hasRecord = !!record;
+            const isThisSelected = selectedHabit?.id === habit.id;
 
             return (
               <div
-                key={task.id}
-                className={`task-card task-ideal ${hasReal ? 'has-real' : ''}`}
-                style={{ top: `${top}px`, height: `${height - 2}px` }}
+                key={`habit-${habit.id}`}
+                className={`habit-block habit-ideal ${hasRecord ? 'has-record' : ''} ${isThisSelected ? 'selected' : ''} ${onSelectHabit && mode === 'idle' && !hasRecord ? 'clickable' : ''}`}
+                style={{
+                  top: `${top}px`,
+                  height: `${height - 2}px`,
+                }}
+                onClick={() => {
+                  if (onSelectHabit && mode === 'idle' && !hasRecord) {
+                    onSelectHabit(habit);
+                  }
+                }}
               >
-                <div className="task-time">IDEAL: {formatTime(task.startTime)} - {formatTime(task.endTime)}</div>
-                <div className="task-title">{task.title}</div>
+                <div className="habit-header">
+                  <span className="habit-label">IDEAL: {habit.title.toUpperCase()}</span>
+                  <span className="habit-duration">({formatTimeFromMinutes(habit.endTime - habit.startTime).replace(':', 'H ')}M)</span>
+                </div>
+                {hasRecord && <span className="habit-check">✓</span>}
               </div>
             );
           })}
 
-          {realTasks.map(task => {
-            const top = (task.startTime / 10) * SLOT_HEIGHT;
-            const height = ((task.endTime - task.startTime) / 10) * SLOT_HEIGHT;
+          {/* Render habit real records - solid red fill */}
+          {records.map(record => {
+            if (record.actualStartTime === null || record.actualEndTime === null) return null;
+            const habit = habits.find(h => h.id === record.habitId);
+            if (!habit) return null;
+
+            const top = (record.actualStartTime / 10) * SLOT_HEIGHT;
+            const height = ((record.actualEndTime - record.actualStartTime) / 10) * SLOT_HEIGHT;
+            const duration = record.actualEndTime - record.actualStartTime;
+            const hours = Math.floor(duration / 60);
+            const mins = duration % 60;
+            const durationText = hours > 0 ? `${hours}H${mins > 0 ? ` ${mins}M` : ''}` : `${mins}M`;
 
             return (
               <div
-                key={task.id}
-                className="task-card task-real"
-                style={{ top: `${top}px`, height: `${height - 2}px` }}
+                key={`record-${record.id}`}
+                className="habit-block habit-real"
+                style={{
+                  top: `${top}px`,
+                  height: `${height - 2}px`,
+                }}
               >
-                <div className="task-time">REAL: {formatTime(task.startTime)} - {formatTime(task.endTime)}</div>
-                <div className="task-title">{task.title}</div>
+                <div className="real-header">
+                  <span className="real-label">REAL: {durationText}</span>
+                </div>
+                <div className="real-title">{habit.title}</div>
               </div>
             );
           })}
@@ -386,50 +340,32 @@ export default function DailyCalendar({
               className="time-indicator"
               style={{ top: `${getTimeIndicatorPosition()}px` }}
             >
+              <div className="indicator-dot"></div>
               <div className="indicator-line"></div>
             </div>
           )}
         </div>
       </div>
 
-      {showTaskForm && (
+      {showConfirmForm && (
         <div className="task-form-overlay">
-          <div className={`task-form ${mode === 'marking-real' ? 'form-real' : ''}`}>
-            <h3 className="form-title">
-              {mode === 'setting-ideal' ? 'NUEVA TAREA IDEAL' : `TIEMPO REAL: ${selectedIdealTask?.title}`}
-            </h3>
+          <div className="task-form">
+            <h3 className="form-title">Registrar: {selectedHabit?.title}</h3>
             <div className="form-time">
-              {formatTime(Math.min(selectionStart!, selectionEnd!))} - {formatTime(Math.max(selectionStart!, selectionEnd!) + 10)}
+              {formatTimeFromMinutes(Math.min(selectionStart!, selectionEnd!))} - {formatTimeFromMinutes(Math.max(selectionStart!, selectionEnd!) + 10)}
             </div>
 
-            {mode === 'setting-ideal' && (
-              <>
-                <input
-                  type="text"
-                  className="form-input"
-                  placeholder="TÍTULO"
-                  value={taskTitle}
-                  onChange={(e) => setTaskTitle(e.target.value)}
-                  autoFocus
-                />
-                <textarea
-                  className="form-textarea"
-                  placeholder="DESCRIPCIÓN (OPCIONAL)"
-                  value={taskDescription}
-                  onChange={(e) => setTaskDescription(e.target.value)}
-                />
-              </>
-            )}
+            {error && <div className="form-error">{error}</div>}
 
             <div className="form-buttons">
-              <button className="form-btn cancel-btn" onClick={handleCancelTask}>CANCELAR</button>
-              <button className="form-btn create-btn" onClick={handleCreateTask}>
-                {mode === 'setting-ideal' ? 'CREAR' : 'CONFIRMAR'}
-              </button>
+              <button className="form-btn cancel-btn" onClick={handleCancelRecord}>Cancelar</button>
+              <button className="form-btn create-btn" onClick={handleConfirmRecord}>Confirmar</button>
             </div>
           </div>
         </div>
       )}
+
+      {children}
 
       <style jsx>{`
         .calendar-container {
@@ -439,17 +375,18 @@ export default function DailyCalendar({
           max-height: 800px;
           display: flex;
           flex-direction: column;
-          background: #000000;
-          border: 4px solid #ffffff;
+          background: #ffffff;
+          border: 1px solid #e2e8f0;
+          border-radius: 20px;
           overflow: hidden;
-          font-family: 'Courier New', Courier, monospace;
+          box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.08), 0 2px 4px -1px rgba(0, 0, 0, 0.04);
           position: relative;
         }
 
         .calendar-header {
-          padding: 16px 20px;
+          padding: 20px 24px;
           background: #ffffff;
-          border-bottom: 4px solid #000000;
+          border-bottom: 1px solid #f1f5f9;
           flex-shrink: 0;
         }
 
@@ -467,130 +404,119 @@ export default function DailyCalendar({
         }
 
         .current-date {
-          font-size: 0.9rem;
-          font-weight: 900;
-          color: #000000;
-          letter-spacing: 0.08em;
+          font-size: 1.1rem;
+          font-weight: 600;
+          color: #1e293b;
           margin: 0;
         }
 
         .time-text {
-          font-size: 1.1rem;
-          font-weight: 900;
-          color: #000000;
+          font-size: 0.875rem;
+          font-weight: 500;
+          color: #6366f1;
         }
 
         .navigation-buttons {
           display: flex;
-          gap: 0;
+          gap: 8px;
+          align-items: center;
         }
 
         .nav-btn, .today-btn {
           display: flex;
           align-items: center;
           justify-content: center;
-          background: #ffffff;
-          border: 3px solid #000000;
-          color: #000000;
+          background: #f8fafc;
+          border: 1px solid #e2e8f0;
+          color: #64748b;
           cursor: pointer;
-          font-weight: 900;
-          font-family: 'Courier New', Courier, monospace;
+          font-weight: 500;
+          transition: all 0.2s;
+          border-radius: 10px;
         }
 
-        .nav-btn { width: 32px; height: 32px; font-size: 0.85rem; }
-        .today-btn { padding: 6px 12px; background: #000; color: #fff; font-size: 0.75rem; letter-spacing: 0.1em; }
-        .nav-btn:hover { background: #000; color: #fff; }
-        .today-btn:hover { background: #fff; color: #000; }
-
-        .task-tags-section {
-          margin-top: 10px;
-          padding-top: 10px;
-          border-top: 2px solid #e0e0e0;
+        .nav-btn { 
+          width: 36px; 
+          height: 36px; 
         }
-
-        .tags-label {
-          font-size: 0.6rem;
-          font-weight: 900;
-          color: #666;
-          letter-spacing: 0.1em;
-          display: block;
-          margin-bottom: 6px;
+        
+        .today-btn { 
+          padding: 8px 16px; 
+          font-size: 0.8rem;
         }
-
-        .task-tags {
-          display: flex;
-          flex-wrap: wrap;
-          gap: 6px;
+        
+        .nav-btn:hover, .today-btn:hover { 
+          background: #f1f5f9; 
+          border-color: #cbd5e1;
+          color: #1e293b;
         }
-
-        .task-tag {
-          display: flex;
-          flex-direction: column;
-          gap: 2px;
-          padding: 6px 10px;
-          background: #00ff00;
-          border: 2px solid #00cc00;
-          color: #000;
-          cursor: pointer;
-          font-family: 'Courier New', Courier, monospace;
-          text-align: left;
-          position: relative;
+        
+        .today-btn.today-active {
+          background: #6366f1;
+          border-color: #6366f1;
+          color: #ffffff;
         }
-
-        .task-tag:hover:not(:disabled) {
-          background: #00cc00;
-          transform: translate(-2px, -2px);
-          box-shadow: 2px 2px 0 #000;
-        }
-
-        .task-tag:disabled { cursor: default; }
-        .task-tag.completed { background: #ccc; border-color: #999; opacity: 0.7; }
-        .task-tag.selected { background: #f00; border-color: #c00; color: #fff; }
-        .tag-title { font-size: 0.7rem; font-weight: 900; }
-        .tag-time { font-size: 0.55rem; opacity: 0.7; }
-        .tag-check { position: absolute; top: 3px; right: 5px; font-size: 0.65rem; font-weight: 900; }
 
         .marking-indicator {
-          margin-top: 8px;
-          padding: 6px 10px;
-          background: #f00;
+          margin-top: 12px;
+          padding: 10px 14px;
+          background: linear-gradient(135deg, #6366f1 0%, #818cf8 100%);
+          border-radius: 10px;
           color: #fff;
           display: flex;
           justify-content: space-between;
           align-items: center;
-          font-size: 0.7rem;
+          font-size: 0.8rem;
+          font-weight: 500;
         }
 
         .cancel-btn-small {
-          background: transparent;
-          border: 2px solid #fff;
+          background: rgba(255, 255, 255, 0.2);
+          border: none;
           color: #fff;
-          width: 20px;
-          height: 20px;
+          width: 24px;
+          height: 24px;
+          border-radius: 6px;
           cursor: pointer;
-          font-weight: 900;
-          font-size: 0.7rem;
+          font-weight: 600;
+          transition: all 0.2s;
         }
 
-        .cancel-btn-small:hover { background: #fff; color: #f00; }
+        .cancel-btn-small:hover { 
+          background: rgba(255, 255, 255, 0.3); 
+        }
 
         .time-grid-container {
           flex: 1;
           overflow-y: auto;
           position: relative;
           scrollbar-width: thin;
-          scrollbar-color: #fff #000;
+          scrollbar-color: #cbd5e1 #f1f5f9;
+        }
+
+        .time-grid-container::-webkit-scrollbar {
+          width: 6px;
+        }
+
+        .time-grid-container::-webkit-scrollbar-track {
+          background: #f1f5f9;
+        }
+
+        .time-grid-container::-webkit-scrollbar-thumb {
+          background: #cbd5e1;
+          border-radius: 3px;
         }
 
         .hours-column {
           position: absolute;
           left: 0;
           top: 0;
-          width: 60px;
+          width: 56px;
           height: ${TOTAL_HEIGHT}px;
           z-index: 20;
-          background: #000000;
+          background: #ffffff;
           pointer-events: none;
+          border-right: 1px solid #f1f5f9;
         }
 
         .hour-row {
@@ -601,17 +527,16 @@ export default function DailyCalendar({
         }
 
         .hour-text {
-          font-size: 0.7rem;
-          font-weight: 700;
-          color: #666;
+          font-size: 0.65rem;
+          font-weight: 500;
+          color: #94a3b8;
           text-transform: uppercase;
-          letter-spacing: 0.08em;
         }
 
         .time-grid {
           position: relative;
           height: ${TOTAL_HEIGHT}px;
-          margin-left: 60px;
+          margin-left: 56px;
         }
 
         .time-slot {
@@ -621,55 +546,113 @@ export default function DailyCalendar({
         }
 
         .time-slot.hour-start {
-          border-top: 1px solid #333;
+          border-top: 1px solid #f1f5f9;
         }
 
         .time-slot.selecting-mode { cursor: crosshair; }
         
-        /* current-slot solo aplica cuando NO está seleccionado */
-        .time-slot.current-slot:not(.selected-slot):not(.selected-real) .slot-content { 
-          background: #1a1a1a; 
+        .time-slot.current-slot:not(.selected-real) .slot-content { 
+          background: #f1f5f9; 
         }
         
-        /* Selección siempre tiene prioridad */
-        .time-slot.selected-slot .slot-content { background: #00ff00; }
-        .time-slot.selected-real .slot-content { background: #ff3333; }
+        .time-slot.selected-real .slot-content { 
+          background: linear-gradient(90deg, #6366f1 0%, #818cf8 100%); 
+        }
 
         .slot-content {
           flex: 1;
           position: relative;
         }
 
-        .task-card {
+        .habit-block {
           position: absolute;
-          left: 0;
-          padding: 3px 6px;
-          border: 2px solid;
+          left: 4px;
+          right: 4px;
+          padding: 8px 12px;
+          border-radius: 12px;
           overflow: hidden;
-          z-index: 5;
+          z-index: 4;
           pointer-events: none;
         }
 
-        .task-card.task-ideal {
-          right: 50%;
-          background: #00ff00;
-          border-color: #00cc00;
-          color: #000;
+        .habit-block.habit-ideal {
+          border: 2px dashed rgba(239, 68, 68, 0.5);
+          background: transparent;
         }
 
-        .task-card.task-ideal.has-real { opacity: 0.5; }
-
-        .task-card.task-real {
-          left: 50%;
-          right: 0;
-          background: #ff0000;
-          border-color: #cc0000;
-          color: #fff;
-          z-index: 6;
+        .habit-block.habit-ideal.has-record {
+          opacity: 0.4;
         }
 
-        .task-time { font-size: 0.5rem; font-weight: 700; opacity: 0.8; }
-        .task-title { font-size: 0.65rem; font-weight: 900; margin-top: 1px; }
+        .habit-block.habit-ideal.selected {
+          border-color: #ef4444;
+          box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.2);
+        }
+
+        .habit-block.habit-ideal.clickable {
+          pointer-events: auto;
+          cursor: pointer;
+        }
+
+        .habit-block.habit-ideal.clickable:hover {
+          border-color: #ef4444;
+          background: rgba(239, 68, 68, 0.05);
+        }
+
+        .habit-block.habit-real {
+          left: 4px;
+          right: 4px;
+          z-index: 7;
+          background: #ef4444;
+          border: none;
+          border-radius: 12px;
+        }
+
+        .habit-header {
+          display: flex;
+          align-items: center;
+          gap: 6px;
+        }
+
+        .habit-label { 
+          font-size: 0.7rem; 
+          font-weight: 500; 
+          color: #94a3b8;
+          letter-spacing: 0.02em;
+        }
+
+        .habit-duration {
+          font-size: 0.65rem;
+          color: #94a3b8;
+        }
+        
+        .habit-check { 
+          position: absolute; 
+          top: 8px; 
+          right: 10px; 
+          font-size: 0.75rem; 
+          color: #ef4444; 
+          font-weight: 700; 
+        }
+
+        .real-header {
+          display: flex;
+          align-items: center;
+        }
+
+        .real-label { 
+          font-size: 0.85rem; 
+          font-weight: 700; 
+          color: #ffffff;
+          letter-spacing: 0.02em;
+        }
+        
+        .real-title { 
+          font-size: 0.7rem; 
+          font-weight: 500; 
+          color: rgba(255, 255, 255, 0.85); 
+          margin-top: 2px; 
+        }
 
         .time-indicator {
           position: absolute;
@@ -681,17 +664,25 @@ export default function DailyCalendar({
           pointer-events: none;
         }
 
+        .indicator-dot {
+          width: 8px;
+          height: 8px;
+          background: #ef4444;
+          border-radius: 50%;
+          margin-left: -4px;
+        }
+
         .indicator-line {
           flex: 1;
           height: 2px;
-          background: #ff0000;
-          box-shadow: 0 0 4px #ff0000;
+          background: #ef4444;
         }
 
         .task-form-overlay {
           position: absolute;
           top: 0; left: 0; right: 0; bottom: 0;
-          background: rgba(0, 0, 0, 0.9);
+          background: rgba(15, 23, 42, 0.6);
+          backdrop-filter: blur(4px);
           display: flex;
           align-items: center;
           justify-content: center;
@@ -699,50 +690,70 @@ export default function DailyCalendar({
         }
 
         .task-form {
-          background: #000;
-          border: 4px solid #0f0;
-          padding: 20px;
+          background: #ffffff;
+          border-radius: 16px;
+          padding: 24px;
           width: 90%;
-          max-width: 380px;
+          max-width: 360px;
+          box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.1);
         }
 
-        .task-form.form-real { border-color: #f00; }
-        .form-title { font-size: 0.9rem; font-weight: 900; color: #0f0; letter-spacing: 0.12em; margin: 0 0 6px 0; }
-        .form-real .form-title { color: #f00; }
-        .form-time { font-size: 0.75rem; color: #888; margin-bottom: 14px; }
-
-        .form-input, .form-textarea {
-          width: 100%;
-          background: #111;
-          border: 2px solid #333;
-          color: #fff;
-          font-family: 'Courier New', Courier, monospace;
-          font-size: 0.85rem;
-          padding: 10px;
-          margin-bottom: 10px;
-          box-sizing: border-box;
+        .form-title { 
+          font-size: 1rem; 
+          font-weight: 600; 
+          color: #1e293b; 
+          margin: 0 0 8px 0; 
+        }
+        
+        .form-time { 
+          font-size: 0.875rem; 
+          color: #64748b; 
+          margin-bottom: 16px; 
+        }
+        
+        .form-error {
+          background: #fef2f2;
+          border: 1px solid #fecaca;
+          color: #dc2626;
+          padding: 10px 14px;
+          border-radius: 8px;
+          margin-bottom: 16px;
+          font-size: 0.8rem;
         }
 
-        .form-input:focus, .form-textarea:focus { outline: none; border-color: #0f0; }
-        .form-textarea { min-height: 70px; resize: vertical; }
-
-        .form-buttons { display: flex; gap: 10px; }
+        .form-buttons { 
+          display: flex; 
+          gap: 12px; 
+        }
 
         .form-btn {
           flex: 1;
-          padding: 10px;
-          border: 3px solid;
-          font-family: 'Courier New', Courier, monospace;
-          font-size: 0.8rem;
-          font-weight: 900;
-          letter-spacing: 0.1em;
+          padding: 12px;
+          border-radius: 10px;
+          font-size: 0.875rem;
+          font-weight: 600;
           cursor: pointer;
+          transition: all 0.2s;
+          border: none;
         }
 
-        .cancel-btn { background: transparent; border-color: #666; color: #666; }
-        .cancel-btn:hover { border-color: #fff; color: #fff; }
-        .create-btn { background: #0f0; border-color: #0f0; color: #000; }
-        .form-real .create-btn { background: #f00; border-color: #f00; color: #fff; }
+        .cancel-btn { 
+          background: #f1f5f9; 
+          color: #64748b; 
+        }
+        
+        .cancel-btn:hover { 
+          background: #e2e8f0; 
+        }
+        
+        .create-btn { 
+          background: linear-gradient(135deg, #6366f1 0%, #818cf8 100%); 
+          color: #fff; 
+        }
+        
+        .create-btn:hover {
+          box-shadow: 0 4px 6px rgba(99, 102, 241, 0.4);
+        }
       `}</style>
     </div>
   );
